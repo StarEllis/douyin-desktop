@@ -60,6 +60,8 @@ app/
     index.js                 入口：判断 frame 与站点后分派（实际只在顶层 frame 运行）
     gm-api.js                GM_* API 实现
     inject.js                注入 vendor 依赖与用户脚本
+    video-visibility-guard.js 移除脚本里会连播放器一起藏掉的 :has 规则
+    style-cost-guard.js      移除脚本里当前页面不可能命中的 :has 分支（重算代价）
   recovery/                  一类问题一个模块
     blank-page.js            服务器不给页面（黑屏）
     stuck-dialog.js          弹窗点不动
@@ -120,6 +122,7 @@ tools/
 | 判定页面状态不能只看"元素是否存在" | 站点会预建隐藏元素：抖音在**正常页面**上就有一个隐藏的验证 iframe |
 | 状态必须"清得掉"和"设得上"一样可靠 | 否则提示会永久留在窗口标题上（曾经如此） |
 | 注入等 `<html>` 出现，而不是等 `DOMContentLoaded` | 早于 `<html>` 注入会让脚本抛错并**整体中断**（见「注入时机」） |
+| 改脚本注入的样式只能改写选择器，不能删规则，而且必须可逆 | 样式表的顺序和内容都是它含义的一部分：`deleteRule` 会让它后面每条规则上移，恢复时插错位置就是另一种坏法；而单页导航会让门控迟到（从推荐页进直播间），永久改写等于悄悄关掉直播间样式。见「样式重算代价」 |
 | 单元测试的 teardown 失败不得判测试失败 | 清理与断言是两件事；沙箱的删除垫片会让"断言全过"的测试随机失败 |
 
 
@@ -311,6 +314,177 @@ MutationObserver）用 `tools/inspect/video-visibility-guard-probe.js` 在真实
 最后一行是这次验证里最容易被误读的一点：**只看 `parsedRules: 0` 会以为"规则没生效、所以守卫没做事"，
 实际恰好相反 —— 正是守卫把规则删空了**。要分清这两种情况，就在现场插一份同样的 CSS 看它能否解析。
 日志要**在扫描之后**再读（守卫有 300ms 防抖），否则会得到"守卫没动作"的假结论。
+
+### 沉浸模式「鼠标进入显示」：唯一一处直接改 bundle 的地方
+
+**症状**：这个模式下全屏看视频，画面比屏幕矮一截、底部留一条黑边。切到「全部」就正常。
+
+**原因**：这个模式只把控件 `opacity: 0`（悬停要能显示），控件仍然参与布局；而播放器给底部控制栏
+留了 `bottom: 48px`，`xg-video-container` 因此比屏幕矮 48px，视频按它做 `contain` 适配就跟着变小。
+「全部」模式能铺满，是因为它把控件 `display: none` 了 —— 空间自然还给了视频。
+
+**实测**（真实全屏，2048×1152 屏幕上播 1920×1080）：
+
+| | `xg-video-container` | 画面实际绘制 |
+| --- | --- | --- |
+| 修前 | 2048×1105 | 1964×1105 |
+| 修后 | 2048×1153 | **2048×1152**（正好铺满） |
+
+**为什么这次改在脚本里**：需求就是"改脚本里的这个功能"，且这条规则只在全屏下生效、只影响
+`xg-video-container` 的 `bottom`，与壳的职责无关。所以它是 `fullScreen("mouseEnterShow")` 分支里
+多出的一条 CSS（带 `LOCAL PATCH` 注释），不是新的 preload 模块。
+
+⚠️ **它是唯一一处直接改 `assets/douyin-optimization.user.js` 的补丁。** 上游更新会把它冲掉，
+而且不会有任何报错 —— 症状只是"视频又变小了"。`test/immersive-fullscreen.test.js` 从 bundle 里
+读这个分支来钉住它（同时断言悬停显隐的 `opacity` 规则还在、三条全屏选择器都在），更新脚本后
+`npm test` 失败就说明要重新打补丁。
+
+### 样式重算代价：脚本的 `:has` 分支有一半是给别的页面写的
+
+**症状**：推荐页滚动、切视频、开评论时掉帧，渲染进程 CPU 高。
+
+**为什么是 `:has()`**：`addBlockCSS` 把拿到的**每个**选择器拼进**同一条**规则，于是"视频信息下移"
+这条规则里同时躺着只对直播间成立的段：
+
+```css
+#video-info-wrap,
+[data-e2e="feed-live"] [data-e2e="basicPlayer"] > div:has([aria-label*="直播"]),
+[data-e2e="feed-live"] .douyin-player > div:has(a[href]){ display: none !important; }
+```
+
+推荐页上根本没有 `[data-e2e="feed-live"]`，这两段永远不可能命中 —— 但 `:has()` 是引擎里最贵的形状：
+它走不了快速失效路径（候选子树里任何变化都可能翻转匹配），所以**每次重算都要为它们工作**。
+
+**测量**（`tools/inspect/style-cost-probe.js`，同一渲染器会话内 A/B，页面是推荐页的近似）：
+
+| 400 次强制重算 | 守卫前 | 守卫后 |
+| --- | --- | --- |
+| `RecalcStyleDuration` | 216.1 ms | **15.8 ms** |
+| 重算次数 | 401 | 400 |
+
+**重算次数几乎不变、时间降 13.7 倍** —— `:has()` 让每次重算变贵，不是让重算变多。扫描本身一次性
+2.6 ms，且不在每帧路径上。
+
+> 探针默认开**隐藏窗口**（强制重算是同步的，不依赖窗口被绘制），所以上表的绝对数字不代表前台
+> 场景 —— 有意义的是**同一会话内的 A/B 比值**。加 `--visible` 可对照。
+
+**修法**（`preload/style-cost-guard.js`）：按**顶层逗号**把 `selectorText` 拆成段，逐段判断。一条
+分支的左端复合选择器（到第一个顶层组合符为止）在文档里匹配不到任何元素时，这条分支必然不命中，
+去掉它不改变渲染。判定前会**剥掉伪类**：伪类只会收窄匹配集合（`a:hover` 匹配的是 `a` 的子集），
+所以"骨架匹配不到"⇒"整段匹配不到"，而反向不成立 —— 这个单向蕴含正是它可以安全动手的理由，也让
+`[data-e2e="feed-live"]:hover` 这种形状能被看穿。
+
+不可判定的一律保留（骨架是 `div` 而 `div` 确实存在的、引擎拒绝解析的、整段只有伪类的）：**多留一段
+的代价是性能，多删一段的代价是页面长得不一样**，两者不可比。
+
+两个实现细节：
+
+- **只改写 `selectorText`，不删规则。** 删规则会让它后面每条规则上移，而样式表的顺序是它含义的
+  一部分。整条都不可达时改写成 `:not(*)`：永不匹配、不含 `:has()`、原地保留槽位。
+- **必须可逆。** 从推荐页进直播间是单页导航，`[data-e2e="feed-live"]` 会迟到 —— 永久改写等于悄悄
+  关掉直播间的样式。所以每次改写都记下原始文本，用**动画帧**（每 30 帧一次，且只在真的改写过时才
+  启动）检查门控是否出现，出现就写回。用帧而不是定时器：preload 里的定时器在窗口被遮挡时会停摆
+  （实测 2 s 的间隔 30 秒只跳 3 次就再不增长），而这个检查只在页面被渲染时才有意义。
+
+只处理含 `:has()` 的规则：其余规则走快速失效路径，动它们没有收益却要承担改错的风险。
+
+`test/style-cost-guard.test.js` 的选择器同样**从 bundle 里取**（上游加同形状的选择器会让它失败）；
+`style-cost-probe.js` 在真实渲染器里做 A/B，并顺带验证可逆性 —— 加入门控后 18 条改写里恢复 14 条，
+剩下 4 条的门控是探针页面没有的元素。
+
+### `waitNode` 的等待开销：全在选择器上，不在观察器配置上
+
+**查的是一件可疑但最终不成立的事。** vendor 的 `ElementWait.wait()`（`vendor/domutils.umd.js`）
+在 `document` 上装一个 `{subtree, childList, attributes}` 观察器，只在命中或超时到点时断开，
+而超时为 0 时**根本不会断开**。`attributes: true` 又没有 `attributeFilter` —— 看起来像"全文档任何属性
+写入都会唤醒它，而回调里还要重跑一次 `querySelector`"。bundle 有 23 处调用这个家族。
+
+**结论：这条推理错了，而且错得干净。** 测量见 `tools/inspect/wait-observer-probe.js`（同一会话内
+配对 A/B，每对两侧往返次数相同、顺序交替 —— 第一版没有这两点，于是"不装任何观察器"的那一档也报出
++437 ms）：
+
+| 4 个并发等待，2 s 负载 | Task 增量 | 折算 |
+| --- | --- | --- |
+| 不装观察器 | -15.9 ms | 噪声底 |
+| 廉价选择器 × `childList` | +84.0 ms | 噪声内 |
+| 廉价选择器 × `childList+attributes` | +137.6 ms | 噪声内 |
+| **`:has()` 选择器 × `childList`** | **+1880.6 ms** | 235 ms/s |
+| **`:has()` 选择器 × `childList+attributes`** | **+1814.2 ms** | 227 ms/s |
+
+**两种 config 的差别在噪声里** —— `attributes: true` 不花什么钱，`childList` 也不省什么钱。全部代价
+来自回调里那一个选择器：
+
+| 单次 `querySelectorAll` | 800 行文档 | 7200 行文档 |
+| --- | --- | --- |
+| `[id^="douyin-header"] div:has(.dy-tip-container)` | 1282 µs | **10393 µs（8.1x）** |
+| `head`（裸类型选择器） | 21 µs | 197 µs（9.4x） |
+| `#root div[class*='-os']`、`[data-e2e=…]`、`#slideMode` | 0–0.5 µs | 0–0.5 µs（1x） |
+
+**带 id 或属性选择器的走索引，是 O(1)；`:has()` 与裸类型选择器不走索引，代价随文档线性增长。**
+所以 1.2 ms 是**下限**，不是真实页面的数字 —— 真实页面元素更多，单价只会更高。
+
+**审计的其余部分都是干净的**，一并记下以免重查：bundle 里 `attributes: true` 只出现在 `wait()` 内部，
+没有第二处；bundle 自己那约 20 个长驻观察器是 `childList+subtree` 且套了 50 ms 的 `LockFunction`；
+23 处调用里 19 处带超时（2000 / 2500 / 3000 / 10000 / 20000 ms），4 处永久但全都无害
+（`waitRemove` 是死代码、`#slidelist` 与 `head` 会立刻命中、`#relatedVideoCard` 单价 0 µs）；
+`app/` 自己没有任何常驻定时器，两个 guard 的观察器是 `{childList: true}` 挂在 `<head>`/`<html>` 上。
+
+**唯一落点**是第 2973 行 `waitNode('[id^="douyin-header"] div:has(.dy-tip-container)', WAIT_TIME)`
+—— 直播页的"伪装登录"，寿命 20 s。它藏在脚本自己的开关 `disguiseLogin` 后面，而那个开关
+**默认关闭**，脚本给它的说明是"该功能残缺，在部分区域内会失效或者导致功能异常"。所以：
+
+- 它**不是**默认配置下卡顿的原因 —— 默认配置根本不走这条路；
+- 应用**不做**任何拦截。这类"改在壳里"的手段（`style-cost-guard.js` 那样）针对的是**无法避免**的
+  代价；这里用户不打开开关就不存在，而任何全局性的补丁（比如包装 `MutationObserver` 去合并投递）
+  都会同时作用到抖音自己的 React 观察器上，风险远大于收益；
+- **也不加进 `storage/harmful-settings.js`。** 那个机制的价值全在可信度上（它警告的是"会让页面坏掉"
+  的设置，目前只有黑屏那一条），把一条纯性能问题塞进去会稀释它。脚本自己已经标注了这个开关。
+
+上游若要修，一行就够：给它一个短超时，或把 `div:has(.dy-tip-container)` 换成
+`[id^="douyin-header"] .dy-tip-container`（它只用这次等待当信号，随后单独查 `#douyin-header`）。
+
+### 遮挡与停帧：`backgroundThrottling: false` 确实在干活，`CalculateNativeWinOcclusion` 是空的
+
+**这是一个悬了很久的问题的答案。** 起因是"Edge 上装着同一个脚本也照样流畅"，而应用侧一直找不到原因，
+于是怀疑 Chromium 把窗口当成被遮挡而停止产帧。之前的结论是"不加 `disable-features=CalculateNativeWinOcclusion`
+之类的开关，那是猜测"，并且明确写了推翻它需要什么：**同一个窗口，聚焦 vs 被完全遮挡的对照。**
+
+`tools/inspect/occlusion-probe.js` 做了这个对照（逐秒采样，两种设置各跑两遍）：
+
+| 状态 | `backgroundThrottling: false`（本项目） | `backgroundThrottling: true`（Chromium 默认） |
+| --- | --- | --- |
+| 聚焦 · 完全可见 | rAF 182 / timer 63 / `visible` | rAF 181 / timer 63 / `visible` |
+| 可见但未聚焦 | rAF 182 / timer 63 / `visible` | rAF 182 / timer 63 / `visible` |
+| 被遮住 60% 宽 | rAF 182 / timer 63 / `visible` | rAF 182 / timer 63 / `visible` |
+| **被完全遮住** | **rAF 182 / timer 63 / `visible`** | **rAF 0 / timer 1 / `hidden`** |
+| **最小化** | **rAF 1 / timer 61 / `visible`** | **rAF 0 / timer 1 / `hidden`** |
+| 恢复并聚焦 | rAF 182 / timer 63 / `visible` | rAF 182 / timer 63 / `visible` |
+
+四条结论：
+
+- **这个设置在干实事**，而且机制就是注释里写的那句：它让页面**始终被告知自己是 `visible`**。
+  去掉它，被遮住的窗口直接停帧（0 fps）、定时器被钳到 1/秒。`main/window.js` 的注释因此是对的。
+- **`CalculateNativeWinOcclusion` 在本构建里是空操作**：加 `--flag` 后两种设置的数字一模一样，
+  而且 `disable-features` 的原值是**空**的（Electron 自己没设）。**不要加它。**
+- **部分遮挡（60%）与"可见但未聚焦"都是满速** —— 没有误报，所以"另一个窗口压住一部分就掉帧"不成立。
+- **最小化时 rAF 掉到 1/秒是正常的**（没有东西要画），而定时器按本项目的设置仍然是 61/秒。
+
+**同时纠正一条被记录的信念。** 之前记的是"preload 里的 `setInterval` 在窗口被遮挡时会彻底停摆
+（2 s 的间隔，30 秒只跳 3 次）"。**用本项目的窗口设置复现不出来** —— 最小化时定时器仍是 61/秒。
+那个现象对应的是上表**右边那一列**，也就是**没带 `backgroundThrottling: false` 的窗口**（探针窗口
+很容易就是这样）。所以"需要定期做点什么就挂 rAF"这条建议的**理由**是错的：在这个应用里定时器更可靠，
+而 rAF 才是最小化时会停的那个。结论本身（视觉相关的检查挂 rAF）仍然成立，但要说对理由。
+
+**方法上的三个坑**（都踩过）：
+
+- **一次读一个总数会给出相反的答案。** 第一版每阶段只读一次（2.5 s 窗口），连续两次运行分别报出
+  180 fps 和 0 fps —— 原生遮挡检测不是立刻生效的，短窗口会在状态传播到之前就结束。**逐秒采样**才看得见
+  "什么时候开始掉"，也不依赖窗口恰好落在哪一段。
+- **别用 2 秒的间隔去测"有没有被钳制"。** 钳制是 1 秒粒度，2 秒间隔被钳制前后都是 0.5/秒，**区分不出来**；
+  200 ms（正常 5/秒、钳制 1/秒）才行。
+- **开关的取值要在报告和窗口之间只写一次。** 第一版把 `--throttled` 写成了 `backgroundThrottling: !THROTTLED`，
+  表头却打印 `true` —— 于是**两次用的是同一个设置**，却被当成两组设置的对照来读。现在取值只在一个
+  常量里写一次，表头也打印那个常量。
 
 ### 单实例锁
 
@@ -535,7 +709,14 @@ React 容器属性沿 fiber 树找到组件的 `defaultHandler` prop 并调用�
 
 > **为什么不等宽限期**：点击发起的请求是 fire-and-forget，关掉弹窗**不会取消它**；抖音自己的倒计时
 > 路径也是同步关闭的。等待没有收益，只会让用户以为程序坏了。唯一的让步是状态需连续两次轮询成立
-> （默认 400ms 轮询），以免把单帧重渲染误判成卡死。
+> （弹窗在屏时 100ms 一次），以免把单帧重渲染误判成卡死。
+
+**检测节奏按需分档。** 弹窗属于"退出登录"，日常根本不存在，所以空闲时 500ms 才看一次（一次
+`getElementById`）；弹窗出现后切到 100ms，因为卡死状态可能在一次点击内翻转。这原来是固定的 400ms
+`setInterval`，两个方向都不对：弹窗不在时白跑，而 preload 的定时器**在窗口被遮挡时会停摆**
+（实测 2 s 的间隔 30 秒只跳 3 次就再不增长）—— 那意味着恢复会悄悄失效。改用动画帧：帧在页面不被
+渲染时自然停下（那正是没有任何东西可点的时刻），且与绘制同一个时钟。没有帧时钟时退回定时器 ——
+watcher 静默不工作，是这里最贵的失败。
 
 "按钮不可用"覆盖多种信号：`pointer-events: none`、`disabled`、`aria-disabled="true"`、
 `semi-button-loading` 类、**只带一个 spinner 子元素**。漏判是**静默**的（什么都不发生、也不打日志），
@@ -654,6 +835,10 @@ GitHub 连接不稳时给命令加重试，并先查是否已留下带资产的�
 | 复现"服务器不给页面" | `simulate-refused-document.js`（单次）、`simulate-persistent-refusal.js`（持续，验证整条阶梯） |
 | 会话与存储 | `session-cookie-probe.js`、`cookie-transfer-probe.js`、`clear-storage-probe.js` |
 | 弹窗形态与关闭耗时 | `frozen-dialog-probe.js`、`invoke-dialog-handler.js`、`measure-dialog-close.js` |
+| 滚动 / 切视频掉帧 | `style-cost-probe.js`（脚本 `:has()` 分支的样式重算代价，A/B，不需要登录） |
+| 直播页卡、或怀疑脚本的等待逻辑在烧 CPU | `wait-observer-probe.js`（`waitNode` 家族的开销归因：观察器配置 vs 选择器单价，不需要登录） |
+| 切到别的窗口后画面停住 / 怀疑被当成后台 | `occlusion-probe.js`（逐秒采样 rAF 与定时器，五种窗口状态，可加 `--flag` / `--throttled` 对照） |
+| 怀疑 console 转发在拖主进程 | `console-forwarding-probe.js`（主进程 CPU/千条，三种订阅方式） |
 | 是我们的壳还是环境 | `plain-electron-probe.js`（纯 Electron，不带 preload 与脚本） |
 
 **启动即退出（GPU 子进程）**：现象是双击后一闪而过，日志里连续若干条

@@ -65,6 +65,27 @@ node tools/inspect/black-screen-probe.js --port=9222
 | `fullscreen-blur-probe.js` | 全屏模糊归因：两个屏蔽开关的选择器**实际命中哪些元素**、其中几个含 `<video>`、谁在画模糊层、以及候选修复选择器的命中情况。`--steps=N` 决定滑几个视频 |
 | `video-visibility-guard-probe.js` | 在真实渲染器里验证 `preload/video-visibility-guard.js`：合成同样的结构与规则，断言规则被移除、元素恢复可见。不需要登录 |
 
+## 渲染性能
+
+| 脚本 | 用途 |
+| --- | --- |
+| `style-cost-probe.js` | 脚本 `:has()` 分支的样式重算代价，同一渲染器会话内 A/B：把 bundle 里真实的 CSS 注入一个推荐页形状的合成页面，量 `RecalcStyleDuration`，跑一遍 `preload/style-cost-guard.js` 再量一次，并验证改写可逆。**不需要登录，也不需要 app 在运行**（自己开一个隐藏窗口）。`--rounds=` 每阶段重算次数，`--elements=` 合成页面的评论行数 |
+| `wait-observer-probe.js` | `waitNode` 家族的等待开销归因。结论是**代价全在回调的选择器上，不在观察器配置上**：先给每个选择器单独定价（`querySelectorAll` 单价），再用 {廉价选择器, `:has()` 选择器} × {`childList`, `childList+attributes`} 做 2×2 配对 A/B。顺带把文档扩到 9 倍再定一次价，用来判断单价是否随文档规模增长。还会静态解析 bundle 的 23 处 `waitNode*` 调用点、区分有超时与永久（认得 `WAIT_TIME` 这类具名常量）。**不需要登录**。`--observers=` 并发等待数，`--load-ms=` 每轮负载时长，`--reps=` 每阶段配对数 |
+
+> 两个探针都靠**同一会话内的配对 A/B**，因为跨启动的数字不可比。配对本身也要对称：两侧的
+> CDP 往返次数要相同、顺序要交替，否则"重载后第一个跑的那一轮"会固定落在某一侧 ——
+> `wait-observer-probe.js` 的第一版就因此给"不装任何观察器"的那一档量出了 +437 ms。
+
+## 窗口状态：被遮挡、最小化之后还剩多少
+
+| 脚本 | 用途 |
+| --- | --- |
+| `occlusion-probe.js` | 窗口在五种状态下**每秒产出多少帧、定时器还剩多少**：聚焦 / 可见未聚焦 / 遮住 60% / 完全遮住 / 最小化 / 恢复。用来回答"切到别的窗口后画面会不会停住"。`--flag` 关掉 `CalculateNativeWinOcclusion` 做对照，`--throttled` 用 Chromium 默认的 `backgroundThrottling` 做对照。**会短暂用黑窗遮住屏幕。** 结果与三个方法坑见 `AGENTS.md`「遮挡与停帧」 |
+| `console-forwarding-probe.js` | 订阅 `console-message` 让渲染进程把每条 console 都转发到主进程，这个探针量**主进程**为此花的 CPU（每千条），并对比"不订阅 / 只计数 / 应用的真实配置"三种。`--messages=`、`--rounds=`、`--level=` |
+
+> `occlusion-probe.js` 必须**逐秒采样**，不能每阶段只读一个总数：原生遮挡检测有传播延迟，
+> 2.5 秒的窗口会在状态生效之前就结束，连续两次运行会给出相反的答案（实测 180 fps 与 0 fps）。
+
 ## 环境对照：是我们的壳还是环境？
 
 | 脚本 | 用途 |
