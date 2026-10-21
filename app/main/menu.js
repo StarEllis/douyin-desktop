@@ -30,6 +30,7 @@ const {
   disableAntiCrawlCookieRemoval,
   repairUnloadablePage,
   requestStuckDialogRecovery,
+  saveCurrentFrame,
   showAbout,
 } = require('./actions');
 const { exportUserscriptConfig, importUserscriptConfig } = require('./userscript-config');
@@ -151,6 +152,8 @@ function buildToolSubmenu() {
     { label: '关闭「移除某些Cookie」（黑屏的已知原因）', click: () => disableAntiCrawlCookieRemoval() },
     { type: 'separator' },
     { label: '打开运行日志', click: () => { shell.openPath(log.path).catch(() => {}); } },
+    // The one thing a DOM probe cannot record: what the pixels actually look like.
+    { label: '保存当前画面（截图）', click: () => { saveCurrentFrame(); } },
     {
       // Off by default: it samples while the user watches, so it is something you switch on
       // to reproduce a bug and switch off afterwards. See diagnostics/player-probe.js.

@@ -1,6 +1,6 @@
 {
   "name": "douyin-desktop",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "抖音网页端 Electron 桌面应用，内置抖音优化用户脚本。",
   "main": "app/main.js",
   "author": "yhgeo",

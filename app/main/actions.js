@@ -8,9 +8,11 @@
  * user what happened. Each one exists because a specific failure had no in-page escape.
  */
 
+const fs = require('node:fs');
+const path = require('node:path');
 const { app, dialog, session, shell } = require('electron');
 const log = require('../diagnostics/logger');
-const { APP_NAME, USER_DATA } = require('../platform/constants');
+const { APP_NAME, LOG_DIR, USER_DATA } = require('../platform/constants');
 const { getMainWindow } = require('./window');
 const { broadcast } = require('./broadcast');
 const { clearCommands, resetLoadState, scheduleMenuRebuild } = require('./userscript-menu');
@@ -202,12 +204,45 @@ async function showAbout() {
   }
 }
 
+/**
+ * Save what the window is showing right now.
+ *
+ * A screenshot is the one piece of evidence a DOM probe cannot produce: whether a region is
+ * black or blurred is a fact about pixels, and the layers that decide it are chosen by the
+ * site at runtime. Pairing it with the player recorder (which logs the DOM state once a
+ * second) is what makes "it looks wrong on my machine" actionable.
+ *
+ * Written next to the log so both halves of the report travel together.
+ */
+async function saveCurrentFrame() {
+  const window = getMainWindow();
+  if (!window) return { ok: false, error: '没有窗口' };
+  try {
+    const image = await window.webContents.capturePage();
+    const pad = (n) => String(n).padStart(2, '0');
+    const now = new Date();
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-`
+      + `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const file = path.join(LOG_DIR, `capture-${stamp}.png`);
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.writeFileSync(file, image.toPNG());
+    log.info('已保存当前画面', { file });
+    shell.showItemInFolder(file);
+    return { ok: true, file };
+  } catch (error) {
+    const message = String((error && error.message) || error);
+    log.error('保存当前画面失败', { error: message });
+    return { ok: false, error: message };
+  }
+}
+
 module.exports = {
   clearDouyinSiteData,
   clearUserscriptData,
   disableAntiCrawlCookieRemoval,
   repairUnloadablePage,
   requestStuckDialogRecovery,
+  saveCurrentFrame,
   settleStuckDialogRecovery,
   showAbout,
 };
