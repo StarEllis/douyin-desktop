@@ -81,6 +81,7 @@ app/
     settings.js              应用设置
     userscript-store.js      GM 值存储实例
     gm-store.js              存储实现
+    harmful-settings.js      已知会让页面坏掉的脚本开关（不依赖 electron，可单测）
     config-transfer.js       备份格式与校验
   diagnostics/               诊断
     logger.js                应用日志实例
@@ -742,7 +743,7 @@ npm run test:all  # 全部
 
 **刻意串行**（`--test-concurrency=1`）。并行时 Node 测试运行器的进程间协议会偶发
 `Unable to deserialize cloned data due to invalid or unsupported version`，表现为某个测试文件整体失败、
-连测试条数都对不上（142 vs 146），而单独跑那个文件是全过的。串行后连跑 3 次 146/146 全绿。
+连测试条数都对不上（142 vs 146），而单独跑那个文件是全过的。串行后连跑 3 次全绿（当前 178 个用例）。
 这是运行器的环境问题，不是被测代码的问题 —— 但一个偶发红的 `npm test` 会让所有人开始忽略它。
 
 剩下几个模块（`platform/downloads.js`、`web-contents-guard.js`）的行为本身就长在 Electron 对象上，
