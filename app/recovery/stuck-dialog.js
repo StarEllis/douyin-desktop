@@ -76,8 +76,7 @@ function isButtonStuck(button) {
  * the common case of clicking only 保存, which left the dialog wedged forever with
  * nothing recovering it.
  */
-function isStuckDialogPresent() {
-  const dialog = document.getElementById(DIALOG_ID);
+function isStuckDialogPresent(dialog = document.getElementById(DIALOG_ID)) {
   if (!dialog) return false;
 
   const buttons = findDialogButtons(dialog);
@@ -161,6 +160,20 @@ function recoverStuckDialog() {
 }
 
 /**
+ * How often to look for the dialog while it is not on screen.
+ *
+ * This is the interval that matters for smoothness: the dialog belongs to "log out", so on an
+ * ordinary session it is never there, and every look is pure overhead. Half a second is far
+ * more often than a dialog can appear and be clicked, so the only thing the idle interval has
+ * to beat is "the user notices a delay before anything is recovered" - and that delay is
+ * governed by the active interval below, because the dialog is on screen by then.
+ */
+const IDLE_INTERVAL_MS = 500;
+
+/** How often to look once it is on screen: the stuck state can flip within a single click. */
+const ACTIVE_INTERVAL_MS = 100;
+
+/**
  * Watch for the stuck state and close it as soon as it is confirmed.
  *
  * Closing is immediate - the dialog is gone within a couple of polls of the click
@@ -171,31 +184,54 @@ function recoverStuckDialog() {
  * the dialog synchronously without waiting for anything either.
  *
  * The one concession is that the state must survive two consecutive polls, so a
- * single-frame re-render is not mistaken for a wedge. At the default 400ms poll that
- * costs 400ms and bounds the whole thing at roughly 0.8s.
+ * single-frame re-render is not mistaken for a wedge. At the active interval that
+ * costs 100ms and bounds the whole thing at roughly 0.2s.
+ *
+ * **Why animation frames rather than a timer.** This used to be a `setInterval` at a fixed
+ * 400ms, which is the wrong instrument twice over. It ran at full rate while the dialog was
+ * nowhere to be seen, and a preload timer does not survive the window being occluded - measured
+ * on a 2s interval, it ticked three times in 30 seconds and then stopped for good, which for
+ * this watch means the recovery quietly stops working. Frames are self-limiting (they stop when
+ * there is nothing being rendered, which is exactly when nothing can be clicked) and they are
+ * driven by the same clock that paints the page.
  *
  * @param {object} [options]
- * @param {number} [options.pollMs]
+ * @param {Document} [options.doc]
+ * @param {number} [options.pollMs] how often to look while the dialog is on screen
+ * @param {number} [options.idleMs] how often to look while it is not
  * @param {number} [options.graceMs] how long the stuck state must persist
  * @param {number} [options.diagnoseMs] report a dialog that never looks stuck
+ * @param {(container: Element) => object} [options.recover] how to dismiss it
  * @param {(info: object) => void} [options.onRecovered]
  * @param {(info: object) => void} [options.onDiagnostic]
  * @returns {() => void} detaches
  */
 function installStuckDialogWatch(options = {}) {
-  const pollMs = Number.isFinite(options.pollMs) ? options.pollMs : 400;
+  const doc = options.doc || document;
+  const activeMs = Number.isFinite(options.pollMs) ? options.pollMs : ACTIVE_INTERVAL_MS;
+  const idleMs = Number.isFinite(options.idleMs) ? options.idleMs : IDLE_INTERVAL_MS;
   const graceMs = Number.isFinite(options.graceMs) ? options.graceMs : 400;
   const diagnoseMs = Number.isFinite(options.diagnoseMs) ? options.diagnoseMs : 9000;
+  const recover = typeof options.recover === 'function' ? options.recover : recoverStuckDialog;
   const onRecovered = typeof options.onRecovered === 'function' ? options.onRecovered : () => {};
   const onDiagnostic = typeof options.onDiagnostic === 'function' ? options.onDiagnostic : () => {};
 
   let stuckSince = null;
   let presentSince = null;
   let diagnosed = false;
+  let stopped = false;
+  let handle = null;
+  // `null` rather than 0: the first frame of a document reports a `performance.now()` of a few
+  // milliseconds, so comparing against 0 would skip the very first look and delay the watch
+  // for one idle interval after every navigation.
+  let lastCheck = null;
+  let onScreen = false;
 
-  const timer = setInterval(() => {
-    const dialog = document.getElementById(DIALOG_ID);
-
+  // Every duration below is measured against the frame clock's own timestamp rather than
+  // `Date.now()`. Mixing the two would make the grace period depend on how far the frame
+  // timestamp happens to be from wall-clock time, and would make this untestable without
+  // freezing the system clock.
+  const inspect = (dialog, at) => {
     if (!dialog) {
       stuckSince = null;
       presentSince = null;
@@ -203,14 +239,14 @@ function installStuckDialogWatch(options = {}) {
       return;
     }
 
-    if (presentSince === null) presentSince = Date.now();
+    if (presentSince === null) presentSince = at;
 
-    if (!isStuckDialogPresent()) {
+    if (!isStuckDialogPresent(dialog)) {
       stuckSince = null;
       // The dialog normally shows for its countdown, so "present but not stuck" is
       // only worth reporting once it has outlasted any plausible countdown. Without
       // this a detection miss is invisible: nothing happens and nothing is logged.
-      if (!diagnosed && Date.now() - presentSince >= diagnoseMs) {
+      if (!diagnosed && at - presentSince >= diagnoseMs) {
         diagnosed = true;
         onDiagnostic({ reason: 'dialog present but never detected as stuck', ...describeDialog(dialog) });
       }
@@ -218,22 +254,54 @@ function installStuckDialogWatch(options = {}) {
     }
 
     if (stuckSince === null) {
-      stuckSince = Date.now();
+      stuckSince = at;
       return;
     }
-    if (Date.now() - stuckSince < graceMs) return;
+    if (at - stuckSince < graceMs) return;
 
-    const stuckMs = Date.now() - stuckSince;
+    const stuckMs = at - stuckSince;
     stuckSince = null;
-    const result = recoverStuckDialog();
+    const result = recover(dialog);
     if (result.recovered) onRecovered({ ...result, stuckMs });
-  }, pollMs);
+  };
 
-  return () => clearInterval(timer);
+  // Frames when they exist, a timer when they do not. The fallback is not decoration: a watch
+  // that silently never runs is the most expensive kind of failure here, because the user sees
+  // a dead page and nothing anywhere says why.
+  const view = doc.defaultView;
+  const useFrames = Boolean(view) && typeof view.requestAnimationFrame === 'function';
+  const schedule = useFrames
+    ? (fn) => { handle = view.requestAnimationFrame(fn); }
+    : (fn) => { handle = setTimeout(() => fn(Date.now()), idleMs); };
+  const cancel = useFrames
+    ? () => { if (handle !== null) view.cancelAnimationFrame(handle); }
+    : () => { clearTimeout(handle); };
+
+  const tick = (now) => {
+    if (stopped) return;
+    const at = Number.isFinite(now) ? now : Date.now();
+    if (lastCheck === null || at - lastCheck >= (onScreen ? activeMs : idleMs)) {
+      lastCheck = at;
+      const dialog = doc.getElementById(DIALOG_ID);
+      onScreen = Boolean(dialog);
+      inspect(dialog, at);
+    }
+    schedule(tick);
+  };
+
+  schedule(tick);
+
+  return () => {
+    stopped = true;
+    cancel();
+    handle = null;
+  };
 }
 
 module.exports = {
+  ACTIVE_INTERVAL_MS,
   DIALOG_ID,
+  IDLE_INTERVAL_MS,
   describeDialog,
   findDialogButtons,
   installStuckDialogWatch,
