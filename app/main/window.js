@@ -68,6 +68,12 @@ async function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       webviewTag: false,
+      // The interface is Chinese, so spellcheck has nothing to offer here - and Electron's default
+      // is `true`, which means it will fetch a dictionary on demand and then check every editable
+      // field. It also draws red squiggles under perfectly good Chinese text in the search and
+      // comment boxes. Not measured (the cost is small and intermittent, which is exactly the
+      // shape a benchmark reports as noise), so this is adopted on the rationale, not a number.
+      spellcheck: false,
       // Chromium throttles timers and requestAnimationFrame for windows it considers
       // occluded or hidden, and Electron enables that by default. Douyin's own dialogs
       // close from a timer-driven state update (the "是否保存登录信息？" prompt), so once
@@ -75,6 +81,13 @@ async function createWindow() {
       // clicks - the page looks frozen and only a reload recovers. Opening DevTools also
       // clears it, which is the tell-tale sign: DevTools is what disables throttling.
       // A desktop shell has exactly one window; it should never throttle it.
+      //
+      // Measured with tools/inspect/occlusion-probe.js (per-second sampling, two runs each way):
+      // fully covered, `true` gives 0 frames/s with timers clamped to 1/s and the page told
+      // `hidden`, while `false` gives full frames and full-rate timers with the page staying
+      // `visible`. So the preference is doing real work, and the page never being told it is
+      // hidden is the mechanism. Minimized still drops rAF to 1/s in both cases - that one is
+      // just "there is nothing to paint", and timers keep running.
       backgroundThrottling: false,
     },
   });
