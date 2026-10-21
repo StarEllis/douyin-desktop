@@ -16,7 +16,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 
-const { HARD_LIMIT_MULTIPLE, createLogFile } = require('../app/diagnostics/log-file');
+const { HARD_LIMIT_MULTIPLE, createLogFile, dateKey } = require('../app/diagnostics/log-file');
 const {
   attachPageDiagnostics,
   isLoggableNavigation,
@@ -135,36 +135,38 @@ test('repeated console messages are collapsed instead of flooding the log', () =
   const contents = new FakeContents();
 
   attachPageDiagnostics(contents, log, { dedupeMs: 60000 });
-  const csp = "The Content Security Policy directive 'upgrade-insecure-requests' is ignored";
+  // A neutral message: the ones the site actually spams (CSP, playPromise, the APM SDK) are
+  // filtered as noise before dedupe ever sees them - see the noise test below.
+  const repeated = '播放器状态更新失败';
   for (let i = 0; i < 12; i += 1) {
-    contents.emit('console-message', {}, { level: 3, message: csp, lineNumber: 0, sourceId: 'https://www.douyin.com/' });
+    contents.emit('console-message', {}, { level: 3, message: repeated, lineNumber: 0, sourceId: 'https://www.douyin.com/' });
   }
   // A different message must still get through immediately.
   contents.emit('console-message', {}, { level: 3, message: 'something new', lineNumber: 9, sourceId: 'https://www.douyin.com/' });
 
   const lines = fs.readFileSync(log.path, 'utf8').trim().split('\n');
   assert.equal(lines.length, 2, `expected 2 lines, got:\n${lines.join('\n')}`);
-  assert.match(lines[0], /upgrade-insecure-requests/);
+  assert.match(lines[0], /播放器状态更新失败/);
   assert.match(lines[1], /something new/);
   cleanup(dir);
 });
 
 test('the same message from different scripts is still the same message', () => {
-  // Measured on the real site: the CSP warning is reported once per offending script,
+  // Measured on the real site: the same warning is reported once per offending script,
   // so keying on message *and* source produced nine log lines for one problem.
   const dir = tempDir('dedupe-source');
   const log = quiet(() => createLogFile({ dir })).value;
   const contents = new FakeContents();
 
   attachPageDiagnostics(contents, log, { dedupeMs: 60000 });
-  const csp = "The Content Security Policy directive 'upgrade-insecure-requests' is ignored";
+  const repeated = '播放器状态更新失败';
   for (const source of [
     'https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/',
     'https://www.douyin.com/',
     'https://lf-cdn-tos.bytescm.com/obj/rc-verifycenter/rmc-nocaptcha/setup.js',
     '',
   ]) {
-    contents.emit('console-message', {}, { level: 3, message: csp, lineNumber: 0, sourceId: source });
+    contents.emit('console-message', {}, { level: 3, message: repeated, lineNumber: 0, sourceId: source });
   }
 
   const lines = fs.readFileSync(log.path, 'utf8').trim().split('\n');
@@ -173,16 +175,17 @@ test('the same message from different scripts is still the same message', () => 
 });
 
 test('messages that differ only by an embedded id are treated as repeats', () => {
-  // The site's APM SDK logs `[SDK] <epoch-ms> 0 already inited`, which otherwise looks
-  // like a brand new message every single time.
+  // A message carrying an id looks brand new on every occurrence unless the digits are
+  // normalised away. (`[SDK] <epoch-ms> already inited` is the real-world case, but that
+  // one is filtered as noise before it gets here.)
   const dir = tempDir('dedupe-id');
   const log = quiet(() => createLogFile({ dir })).value;
   const contents = new FakeContents();
 
   attachPageDiagnostics(contents, log, { dedupeMs: 60000 });
-  for (const ms of [1789912126867, 1789912999999, 1789913000123]) {
+  for (const id of [1789912126867, 1789912999999, 1789913000123]) {
     contents.emit('console-message', {}, {
-      level: 2, message: `[SDK] ${ms}        0 already inited`, lineNumber: 0, sourceId: 'https://lf3-short.ibytedapm.com/',
+      level: 2, message: `视频 ${id} 预加载失败`, lineNumber: 0, sourceId: 'https://www.douyin.com/',
     });
   }
 
@@ -277,18 +280,19 @@ test('the log stays bounded even when rotation cannot happen', () => {
   // refuses to rename a file another process holds open. Rotation then silently does nothing
   // on every write, and "2 MB cap" stops being a cap.
   //
-  // Forced by making `main.log.2` a non-empty directory: the rotation loop tries to remove it
-  // before renaming `main.log.1` over it, and removing a directory that way throws.
+  // Forced by making the second rotated file a non-empty directory: the rotation loop tries to
+  // remove it before renaming the first one over it, and removing a directory that way throws.
   const dir = tempDir('ceiling');
   const maxBytes = 1024;
   const hardLimit = maxBytes * HARD_LIMIT_MULTIPLE;
+  const key = dateKey();
   try {
-    fs.writeFileSync(path.join(dir, 'main.log.1'), 'older', 'utf8');
-    fs.mkdirSync(path.join(dir, 'main.log.2'));
-    fs.writeFileSync(path.join(dir, 'main.log.2', 'keep'), 'not empty', 'utf8');
+    fs.writeFileSync(path.join(dir, `main-${key}.1.log`), 'older', 'utf8');
+    fs.mkdirSync(path.join(dir, `main-${key}.2.log`));
+    fs.writeFileSync(path.join(dir, `main-${key}.2.log`, 'keep'), 'not empty', 'utf8');
 
     // Bigger than the ceiling before the first write even happens.
-    fs.writeFileSync(path.join(dir, 'main.log'), 'x'.repeat(hardLimit + 2048), 'utf8');
+    fs.writeFileSync(path.join(dir, `main-${key}.log`), 'x'.repeat(hardLimit + 2048), 'utf8');
 
     const log = quiet(() => createLogFile({ dir, maxBytes, keep: 2 })).value;
     log.info('after the ceiling');
@@ -303,4 +307,90 @@ test('the log stays bounded even when rotation cannot happen', () => {
   } finally {
     cleanup(dir);
   }
+});
+
+test('日志按天分文件，文件名带日期', () => {
+  const dir = tempDir('daily');
+  const day = new Date(2026, 9, 21, 10, 0, 0);
+  const log = quiet(() => createLogFile({ dir, now: () => day })).value;
+  log.info('今天');
+
+  assert.equal(path.basename(log.path), 'main-2026-10-21.log');
+  assert.equal(fs.existsSync(log.path), true);
+
+  // 跨天之后写到新文件里，旧文件不动。
+  const nextDay = new Date(2026, 9, 22, 9, 0, 0);
+  const log2 = quiet(() => createLogFile({ dir, now: () => nextDay })).value;
+  log2.info('明天');
+
+  assert.equal(fs.existsSync(path.join(dir, 'main-2026-10-21.log')), true);
+  assert.equal(fs.existsSync(path.join(dir, 'main-2026-10-22.log')), true);
+  cleanup(dir);
+});
+
+test('超过保留天数的日志会被删掉，近期的和别的文件不动', () => {
+  const dir = tempDir('prune');
+  const day = new Date(2026, 9, 21, 10, 0, 0);
+  // 8 天前（超出 7 天）、7 天前（保留）、当天、以及一个不属于本模块的文件。
+  for (const name of ['main-2026-10-13.log', 'main-2026-10-14.log', 'main-2026-10-13.1.log']) {
+    fs.writeFileSync(path.join(dir, name), 'old', 'utf8');
+  }
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'keep me', 'utf8');
+
+  const log = quiet(() => createLogFile({ dir, now: () => day })).value;
+  log.info('写一行就会触发清理');
+
+  assert.equal(fs.existsSync(path.join(dir, 'main-2026-10-13.log')), false, '8 天前的要删');
+  assert.equal(fs.existsSync(path.join(dir, 'main-2026-10-13.1.log')), false, '轮转出来的同一天也要删');
+  assert.equal(fs.existsSync(path.join(dir, 'main-2026-10-14.log')), true, '7 天内的留着');
+  assert.equal(fs.existsSync(path.join(dir, 'notes.txt')), true, '不认识的文件不碰');
+  cleanup(dir);
+});
+
+test('站点自己的控制台噪音不进日志，我们自己的消息照记', () => {
+  const dir = tempDir('noise');
+  const log = quiet(() => createLogFile({ dir })).value;
+  const contents = new FakeContents();
+  attachPageDiagnostics(contents, log, { dedupeMs: 0 });
+
+  const noise = [
+    "The Content Security Policy directive 'upgrade-insecure-requests' is ignored",
+    '%c[xgplayer] >>>>playPromise.catch AbortError',
+    '[SDK] 1789912126867        0 already inited',
+    "Uncaught TypeError: Cannot read properties of null (reading 'definition')",
+    'Failed to load resource: net::ERR_BLOCKED_BY_CLIENT',
+  ];
+  for (const message of noise) {
+    contents.emit('console-message', {}, { level: 3, message, lineNumber: 1, sourceId: 'https://www.douyin.com/' });
+  }
+  // Our own guard messages must survive the filter: they are the log's diagnostics.
+  contents.emit('console-message', {}, {
+    level: 2, message: '[抖音] 已移除会隐藏视频的样式规则', lineNumber: 1, sourceId: 'app/preload/index.js',
+  });
+
+  const text = fs.readFileSync(log.path, 'utf8');
+  assert.equal(text.includes('Content Security Policy'), false);
+  assert.equal(text.includes('playPromise'), false);
+  assert.equal(text.includes('already inited'), false);
+  assert.equal(text.includes('reading \'definition\''), false);
+  assert.equal(text.includes('ERR_BLOCKED_BY_CLIENT'), false);
+  assert.match(text, /已移除会隐藏视频的样式规则/);
+  cleanup(dir);
+});
+
+test('同文档导航（切视频）不写导航日志', () => {
+  const dir = tempDir('inplace');
+  const log = quiet(() => createLogFile({ dir })).value;
+  const contents = new FakeContents();
+  attachPageDiagnostics(contents, log, { dedupeMs: 0 });
+
+  for (let i = 0; i < 20; i += 1) {
+    contents.emit('did-start-navigation', {}, 'https://www.douyin.com/', true, true);
+  }
+  contents.emit('did-start-navigation', {}, 'https://www.douyin.com/video/123', false, true);
+
+  const lines = fs.readFileSync(log.path, 'utf8').trim().split('\n').filter(Boolean);
+  assert.equal(lines.length, 1, `只应有真实加载那一条：\n${lines.join('\n')}`);
+  assert.match(lines[0], /video\/123/);
+  cleanup(dir);
 });

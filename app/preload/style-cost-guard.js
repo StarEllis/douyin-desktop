@@ -67,6 +67,9 @@ const DEBOUNCE_MS = 300;
 /** How often the recovery check runs, in animation frames (~0.5 s at 60 fps). */
 const RECHECK_FRAMES = 30;
 
+/** Aggregate repeated log lines for this long before writing them out. */
+const LOG_THROTTLE_MS = 10000;
+
 /**
  * Split a selector list on its **top-level** commas.
  *
@@ -352,9 +355,31 @@ function installStyleCostGuard(options = {}) {
   const recheckFrames = Number.isFinite(options.recheckFrames) ? options.recheckFrames : RECHECK_FRAMES;
   // console.warn, not console.log: the shell captures warning-level page console output into
   // the log, and this is a change to how the page renders - it should be findable afterwards.
-  const log = options.log || ((message, data) => console.warn(
+  //
+  // Throttled, because one line per rewritten rule is unreadable: a normal session rewrote
+  // 400+ rules and every one of them became a log entry. Entries are aggregated per message
+  // and flushed at most once per window, with the number of occurrences attached - the first
+  // flush still happens quickly, so the log is not silent for long.
+  const rawLog = options.log || ((message, data) => console.warn(
     `[抖音] ${message}${data === undefined ? '' : ` ${JSON.stringify(data)}`}`,
   ));
+  const pending = new Map();
+  let flushTimer = null;
+  const flush = () => {
+    flushTimer = null;
+    const entries = Array.from(pending.entries());
+    pending.clear();
+    for (const [message, entry] of entries) rawLog(message, { ...entry.sample, count: entry.count });
+  };
+  const log = (message, data) => {
+    const entry = pending.get(message) || { count: 0, sample: data };
+    entry.count += 1;
+    if (data !== undefined) entry.sample = data;
+    pending.set(message, entry);
+    if (flushTimer) return;
+    flushTimer = setTimeout(flush, LOG_THROTTLE_MS);
+    if (flushTimer.unref) flushTimer.unref();
+  };
 
   /** rule -> how to restore it. Only ever holds rules this guard rewrote. */
   const changed = new Map();
@@ -446,6 +471,8 @@ function installStyleCostGuard(options = {}) {
     stopped = true;
     clearTimeout(timer);
     timer = null;
+    clearTimeout(flushTimer);
+    flush();
     observer.disconnect();
   };
 }

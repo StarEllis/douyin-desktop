@@ -55,6 +55,21 @@ function registerIpcHandlers() {
     event.returnValue = readSettings().scriptEnabled;
   });
 
+  // --- the player diagnostic recorder (tools menu) ---------------------------
+  //
+  // Synchronous, like `get-script-enabled`: the preload decides at document-start whether to
+  // install the probe at all, and an await there would let the first video play unrecorded.
+  ipcMain.on('get-player-probe', (event) => {
+    event.returnValue = Boolean(readSettings().playerProbe);
+  });
+
+  ipcMain.on('player-probe-sample', (event, sample) => {
+    // The renderer is not a trusted input: it shares a window with the page.
+    if (!senderIsDouyin(event)) return;
+    if (!isPlainObject(sample)) return;
+    log.info('播放器诊断', sample);
+  });
+
   // --- the userscript's own menu entries ------------------------------------
   ipcMain.on('gm-menu-reset', () => {
     clearCommands();

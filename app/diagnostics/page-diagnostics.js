@@ -24,6 +24,39 @@ const MAX_TRACKED_MESSAGES = 200;
 const NOTEWORTHY_LEVELS = new Set(['warning', 'error', 2, 3]);
 
 /**
+ * Console output that is never worth a line in the log.
+ *
+ * Measured over a normal session: 797 warnings and 190 errors arrived from the page itself,
+ * and almost all of them were the site talking to itself - the player aborting a play
+ * promise, the module federation runtime printing its version, CSP upgrade notices, XHR
+ * blocks from ads. They repeat, they never change, and they bury the handful of lines that
+ * matter. Our own messages are prefixed `[抖音]` and are never filtered, because those are
+ * the ones the guards use to say what they did.
+ */
+const SITE_NOISE = [
+  /playPromise|AbortError/i,
+  /already inited/i,
+  /Federation Runtime/i,
+  /Content Security Policy/i,
+  /Access to XMLHttpRequest/i,
+  /Cannot assign to read only property/i,
+  /Cannot read properties of null/i,
+  /Failed to load resource/i,
+  /net::ERR_/i,
+  /^\[Violation\]/,
+];
+
+/**
+ * Is this a message the page emits at itself?
+ *
+ * @param {string} message
+ */
+function isSiteNoise(message) {
+  if (message.startsWith('[抖音]')) return false;
+  return SITE_NOISE.some((pattern) => pattern.test(message));
+}
+
+/**
  * Strip the parts of a message that change on every occurrence.
  *
  * The full original message is still what gets written - this only decides identity.
@@ -65,6 +98,9 @@ function attachPageDiagnostics(contents, log, options = {}) {
 
   const onStart = (event, url, isInPlace, isMainFrame) => {
     if (!isMainFrame) return;
+    // Same-document navigations are the feed switching videos, not a load. There were 1510
+    // of them in one log against 27 real launches - logging them made the file unreadable.
+    if (isInPlace) return;
     if (!isLoggableNavigation(url)) return;
     if (url === lastLoggedUrl) return;
     log.info('开始导航', { url });
@@ -94,6 +130,7 @@ function attachPageDiagnostics(contents, log, options = {}) {
     const line = details ? details.lineNumber : args[3];
     const source = String((details ? details.sourceId : args[4]) || '');
     if (!NOTEWORTHY_LEVELS.has(level)) return;
+    if (isSiteNoise(message)) return;
 
     const key = `${level}|${normalizeForDedupe(message)}`;
     const now = Date.now();

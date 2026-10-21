@@ -9,6 +9,7 @@
  */
 
 const { Menu, shell } = require('electron');
+const path = require('node:path');
 const { APP_NAME, HOME_URL, SCRIPT_NAME } = require('../platform/constants');
 const log = require('../diagnostics/logger');
 const { openExternalSafely } = require('../platform/external-links');
@@ -32,11 +33,45 @@ const {
   showAbout,
 } = require('./actions');
 const { exportUserscriptConfig, importUserscriptConfig } = require('./userscript-config');
+const { applyPreset } = require('./presets');
+const { loadPresets } = require('../storage/presets');
 
 function invokeUserscriptCommand(command) {
   const window = getMainWindow();
   if (!command || !window) return;
   window.webContents.send('invoke-gm-menu-command', command.id);
+}
+
+/** Where the shipped presets live; also the folder the menu offers to open. */
+const PRESET_DIR = path.join(__dirname, '..', '..', 'assets', 'presets');
+
+/**
+ * 预设配置 ▸ …
+ *
+ * Built from whatever JSON files are in `assets/presets`, so adding a preset is adding a
+ * file (the same format as 导出配置). A file that cannot be parsed still appears, disabled,
+ * with the reason as its label - a preset that silently vanished would look like the menu
+ * is broken.
+ */
+function buildPresetSubmenu() {
+  const presets = loadPresets(PRESET_DIR);
+  const items = presets.map((preset) => (preset.ok
+    ? {
+      label: preset.name,
+      click: () => { applyPreset(preset); },
+    }
+    : {
+      label: `${preset.name}（不可用：${preset.error}）`,
+      enabled: false,
+    }));
+
+  if (items.length) items.push({ type: 'separator' });
+  items.push({
+    label: '打开预设文件夹…',
+    click: () => { shell.openPath(PRESET_DIR).catch(() => {}); },
+  });
+
+  return { label: '预设配置', submenu: items };
 }
 
 function buildScriptSubmenu() {
@@ -75,6 +110,7 @@ function buildScriptSubmenu() {
     { type: 'separator' },
     { label: '导出配置到文件…', click: () => exportUserscriptConfig() },
     { label: '从文件导入配置…', click: () => importUserscriptConfig() },
+    buildPresetSubmenu(),
   ];
 
   if (extraCommands.length) {
@@ -115,6 +151,18 @@ function buildToolSubmenu() {
     { label: '关闭「移除某些Cookie」（黑屏的已知原因）', click: () => disableAntiCrawlCookieRemoval() },
     { type: 'separator' },
     { label: '打开运行日志', click: () => { shell.openPath(log.path).catch(() => {}); } },
+    {
+      // Off by default: it samples while the user watches, so it is something you switch on
+      // to reproduce a bug and switch off afterwards. See diagnostics/player-probe.js.
+      label: '记录播放器诊断（复现问题时打开）',
+      type: 'checkbox',
+      checked: Boolean(readSettings().playerProbe),
+      click: (item) => {
+        writeSettings({ ...readSettings(), playerProbe: item.checked });
+        getMainWindow()?.webContents.send('player-probe-set', item.checked);
+        if (item.checked) log.info('播放器诊断已开启：滚动几个视频后到日志里找「播放器诊断」');
+      },
+    },
     { type: 'separator' },
     { label: '清除抖音网页数据…', click: () => clearDouyinSiteData() },
     { label: '清除脚本配置数据…', click: () => clearUserscriptData() },
