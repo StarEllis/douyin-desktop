@@ -19,6 +19,7 @@ const { installStuckDialogWatch, recoverStuckDialog } = require('../recovery/stu
 const { installGmApi } = require('./gm-api');
 const { injectUserscript } = require('./inject');
 const { installVideoVisibilityGuard } = require('./video-visibility-guard');
+const { installStyleCostGuard } = require('./style-cost-guard');
 
 const isDouyin = /(^|\.)douyin\.com$|(^|\.)iesdouyin\.com$/i.test(location.hostname);
 const isTopFrame = window.top === window;
@@ -60,5 +61,10 @@ if (scriptEnabled) {
   // the shell does not otherwise touch the page's stylesheets. See the module for the
   // measurement behind it.
   installVideoVisibilityGuard();
+  // Same reasoning, different problem: the script's stylesheet also carries selector branches
+  // for pages the user is not on, and `:has()` makes every recalculation pay for them. Both
+  // guards are installed before the bundle is evaluated so their observers are already in
+  // place when the stylesheet lands.
+  installStyleCostGuard();
   injectUserscript({ isTopFrame });
 }
