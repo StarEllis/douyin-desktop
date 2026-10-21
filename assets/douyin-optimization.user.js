@@ -9469,6 +9469,19 @@
         ].join(",")}{
           opacity: 1 !important;
         }
+
+        /* LOCAL PATCH: 全屏时把控制栏占掉的那 48px 还给视频。
+           本模式只是把控件透明度降到 0（悬停要能显示出来），控件仍然参与布局：
+           播放器给底部控制栏留了 bottom:48px，于是视频比屏幕矮一截、下方留一条黑边
+           （实测 2048x1152 的屏幕上，1920x1080 的视频只画到 1964x1105）。
+           「全部」模式能铺满是因为它把控件 display:none 了；这里不能隐藏，只能收掉占位。
+           三条选择器对应三种全屏：网页全屏（#slidelist 上的 isCssFullScreen）、
+           真实全屏（Fullscreen API）、xgplayer 自己的全屏类。 */
+        .isCssFullScreen xg-video-container.xg-video-container,
+        :fullscreen xg-video-container.xg-video-container,
+        .xgplayer-is-fullscreen xg-video-container.xg-video-container{
+          bottom: 0px !important;
+        }
       `)
         );
       else if (mode === "bottomInfoWrap-rightToolBar") {
