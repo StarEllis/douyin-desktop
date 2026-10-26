@@ -54,6 +54,9 @@ function registerIpcHandlers() {
   ipcMain.on('get-script-enabled', (event) => {
     event.returnValue = readSettings().scriptEnabled;
   });
+  ipcMain.on('get-experience-enhancer-enabled', (event) => {
+    event.returnValue = senderIsDouyin(event) && readSettings().experienceEnhancerEnabled === true;
+  });
 
   // --- the player diagnostic recorder (tools menu) ---------------------------
   //
