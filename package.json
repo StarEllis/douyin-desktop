@@ -16,7 +16,7 @@
     "test": "node --test --test-concurrency=1 \"test/**/*.test.js\"",
     "test:e2e": "node tools/e2e/run-all.js",
     "test:all": "npm test && npm run test:e2e && npm run test:enhancements",
-    "test:enhancements": "electron tools/e2e/enhancement-main.js"
+    "test:enhancements": "electron tools/e2e/enhancement-main.js && electron tools/e2e/sidebar-persistence-main.js && electron tools/e2e/browser-identity-main.js"
   },
   "build": {
     "appId": "com.yhgeo.douyin",
