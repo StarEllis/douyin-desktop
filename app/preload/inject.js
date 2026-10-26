@@ -12,6 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { ipcRenderer } = require('electron');
 const { whenDocumentElementAvailable } = require('../platform/dom-ready');
+const { installLiveAudience } = require('./live-audience');
 
 /** `@require` order matters: the userscript reads these as globals at load time. */
 const VENDOR_BUNDLES = ['domutils.umd.js', 'pops.umd.js', 'utils.umd.js', 'qmsg.umd.js'];
@@ -46,6 +47,7 @@ function injectUserscript({ isTopFrame }) {
   whenDocumentElementAvailable(() => {
     try {
       VENDOR_BUNDLES.forEach((file) => evaluateBundled(path.join('vendor', file)));
+      window.__douyinDesktopStartLiveAudience = () => installLiveAudience();
       evaluateBundled(USERSCRIPT);
       if (isTopFrame) ipcRenderer.send('userscript-loaded', { ok: true });
     } catch (error) {
